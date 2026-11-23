@@ -1,0 +1,54 @@
+name: Build updater app
+run-name: Building ReCore Updater app
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Build release APK
+        run: gradle --no-daemon assembleRelease -PotaRepo=${{ github.repository }}
+
+      - name: Locate the APK
+        run: |
+          set -euo pipefail
+          APK=$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)
+          [ -n "$APK" ] || { echo "No APK found"; exit 1; }
+          cp "$APK" ReCoreOTA.apk
+          ls -l ReCoreOTA.apk
+
+      - name: Upload as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ReCoreOTA
+          path: ReCoreOTA.apk
+
+      # The ROM build downloads https://github.com/<this repo>/releases/download/app/ReCoreOTA.apk
+      - name: Publish to the app release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! gh release view app > /dev/null 2>&1; then
+            gh release create app --title "Updater app" --notes "Latest ReCore Updater APK. Do not delete." --prerelease
+          fi
+          gh release upload app ReCoreOTA.apk --clobber
