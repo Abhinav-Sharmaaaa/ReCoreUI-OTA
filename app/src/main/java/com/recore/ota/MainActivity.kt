@@ -32,6 +32,7 @@ class MainActivity : Activity() {
     private lateinit var spinner: Spinner
 
     private var feed: Feed? = null
+    private var queue: List<Update> = emptyList()
     private var busy = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -54,6 +55,7 @@ class MainActivity : Activity() {
                 if (c != Ota.channel(this@MainActivity)) {
                     Ota.setChannel(this@MainActivity, c)
                     feed = null
+                    queue = emptyList()
                     updateBtn.visibility = View.GONE
                     changelog.text = ""
                     status.text = "Channel changed to $c. Tap Check for updates."
@@ -106,19 +108,35 @@ class MainActivity : Activity() {
         setStatus("Checking...")
         io.execute {
             try {
+                Ota.cleanup(this)
                 val f = Ota.fetchFeed(Ota.channel(this))
                 ui.post {
                     feed = f
+                    queue = emptyList()
                     if (f == null) {
                         status.text = "No update feed found for this channel."
                         updateBtn.visibility = View.GONE
-                    } else if (Ota.isNewer(f, this)) {
-                        status.text = "Update available: build ${f.build} (${f.channel})"
-                        changelog.text = f.changelog + "\n\nSize: ${f.size / 1048576} MB"
-                        updateBtn.visibility = View.VISIBLE
-                    } else {
+                    } else if (!Ota.behind(f)) {
                         status.text = "You are up to date."
+                        changelog.text = ""
                         updateBtn.visibility = View.GONE
+                    } else {
+                        val q = Ota.queue(f)
+                        queue = q
+                        if (q.isEmpty()) {
+                            status.text = "Build ${f.build} is out, but this phone (build ${Ota.currentBuild()}) can only get it with the full ROM zip."
+                            changelog.text = ""
+                            updateBtn.visibility = View.GONE
+                        } else {
+                            status.text = if (q.size == 1) "1 update available" else "${q.size} updates queued, installed one by one"
+                            val lines = q.mapIndexed { i, u ->
+                                "${i + 1}. Build ${u.build} (${u.size / 1048576} MB)\n${u.changelog}"
+                            }.joinToString("\n\n")
+                            val rest = if (q.last().build != f.build) "\n\nBuild ${f.build} needs the full ROM zip." else ""
+                            changelog.text = lines + rest
+                            updateBtn.text = "Install update 1 of ${q.size} (build ${q.first().build})"
+                            updateBtn.visibility = View.VISIBLE
+                        }
                     }
                 }
             } catch (e: Exception) {
@@ -130,28 +148,33 @@ class MainActivity : Activity() {
     }
 
     private fun update() {
-        val f = feed ?: return
+        val f = queue.firstOrNull() ?: return
         if (busy) return
         busy = true
         updateBtn.isEnabled = false
         checkBtn.isEnabled = false
         io.execute {
             try {
-                setStatus("Downloading...")
-                var last = 0L
-                val zip = Ota.download(this, f) { done, total ->
-                    val now = System.currentTimeMillis()
-                    if (now - last > 500 || done == total) {
-                        last = now
-                        ui.post {
-                            progress.progress = (done * 1000 / total).toInt()
-                            status.text = "Downloading ${done / 1048576} of ${total / 1048576} MB"
+                val free = Ota.freeBytes()
+                if (free < f.requiresFree) {
+                    setStatus("Not enough free storage. Free up about ${f.requiresFree / 1073741824 + 1} GB (you have ${free / 1073741824} GB) and try again.")
+                } else {
+                    setStatus("Downloading build ${f.build}...")
+                    var last = 0L
+                    val zip = Ota.download(this, f) { done, total ->
+                        val now = System.currentTimeMillis()
+                        if (now - last > 500 || done == total) {
+                            last = now
+                            ui.post {
+                                progress.progress = (done * 1000 / total).toInt()
+                                status.text = "Downloading build ${f.build}: ${done / 1048576} of ${total / 1048576} MB"
+                            }
                         }
                     }
+                    setStatus("Verified. Restarting into recovery to install build ${f.build}...")
+                    val err = Ota.install(zip)
+                    if (err != null) setStatus(err)
                 }
-                setStatus("Verified. Restarting into recovery to install...")
-                val err = Ota.install(zip)
-                if (err != null) setStatus(err)
             } catch (e: Exception) {
                 setStatus("Update failed: ${e.message}")
             } finally {

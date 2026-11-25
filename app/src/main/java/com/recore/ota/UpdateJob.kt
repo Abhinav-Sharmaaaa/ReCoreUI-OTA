@@ -13,7 +13,10 @@ class UpdateJob : JobService() {
         Thread {
             try {
                 val feed = Ota.fetchFeed(Ota.channel(this))
-                if (feed != null && Ota.isNewer(feed, this)) Ota.notifyAvailable(this, feed)
+                if (feed != null && Ota.behind(feed)) {
+                    val q = Ota.queue(feed)
+                    if (q.isNotEmpty()) Ota.notifyAvailable(this, q.size, feed.channel)
+                }
             } catch (e: Exception) {
                 // try again at the next period
             } finally {

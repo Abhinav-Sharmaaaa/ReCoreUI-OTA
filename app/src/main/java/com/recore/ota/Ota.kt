@@ -6,6 +6,8 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.os.Environment
+import android.os.StatFs
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -15,15 +17,24 @@ import java.net.URL
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
-data class Feed(
-    val device: String,
-    val channel: String,
+// One published update step. A delta only applies to the exact build in fromBuild.
+data class Update(
     val build: Int,
+    val fromBuild: Int,
+    val type: String,
     val filename: String,
     val url: String,
     val size: Long,
     val sha256: String,
+    val requiresFree: Long,
     val changelog: String
+)
+
+data class Feed(
+    val device: String,
+    val channel: String,
+    val build: Int,
+    val updates: List<Update>
 )
 
 object Ota {
@@ -55,6 +66,25 @@ object Ota {
     private fun feedUrl(channel: String): String =
         "https://github.com/${BuildConfig.OTA_REPO}/releases/download/feed/${device()}-$channel.json"
 
+    private fun parseUpdate(j: JSONObject): Update {
+        val url = j.optString("url", "")
+        val type = j.optString("type", "none")
+        if (type == "delta" && !url.startsWith("https://github.com/${BuildConfig.OTA_REPO}/releases/download/")) {
+            throw IOException("Feed points outside the OTA repo")
+        }
+        return Update(
+            build = j.getInt("build"),
+            fromBuild = if (j.isNull("from_build")) -1 else j.optInt("from_build", -1),
+            type = type,
+            filename = j.optString("filename", ""),
+            url = url,
+            size = j.optLong("size", 0L),
+            sha256 = j.optString("sha256", "").lowercase(),
+            requiresFree = j.optLong("requires_free", 0L),
+            changelog = j.optString("changelog", "")
+        )
+    }
+
     fun fetchFeed(channel: String): Feed? {
         val conn = URL(feedUrl(channel)).openConnection() as HttpURLConnection
         conn.connectTimeout = 15000
@@ -64,29 +94,43 @@ object Ota {
             if (code == 404) return null
             if (code != 200) throw IOException("HTTP $code")
             val j = JSONObject(conn.inputStream.bufferedReader().readText())
-            val url = j.getString("url")
-            if (!url.startsWith("https://github.com/${BuildConfig.OTA_REPO}/releases/download/")) {
-                throw IOException("Feed points outside the OTA repo")
+            val list = ArrayList<Update>()
+            val arr = j.optJSONArray("updates")
+            if (arr != null) {
+                for (i in 0 until arr.length()) list.add(parseUpdate(arr.getJSONObject(i)))
+            } else {
+                list.add(parseUpdate(j))
             }
-            return Feed(
-                device = j.getString("device"),
-                channel = j.getString("channel"),
-                build = j.getInt("build"),
-                filename = j.getString("filename"),
-                url = url,
-                size = j.getLong("size"),
-                sha256 = j.getString("sha256").lowercase(),
-                changelog = j.optString("changelog", "")
-            )
+            return Feed(j.getString("device"), j.getString("channel"), j.getInt("build"), list)
         } finally {
             conn.disconnect()
         }
     }
 
-    // Newer build, or a different channel chosen on purpose (allows going to a lower build).
-    fun isNewer(feed: Feed, ctx: Context): Boolean {
+    fun behind(feed: Feed): Boolean = feed.build > currentBuild()
+
+    // The updates this phone can install one after another, starting from the build it is on.
+    fun queue(feed: Feed): List<Update> {
+        val out = ArrayList<Update>()
+        var cur = currentBuild()
+        while (true) {
+            val step = feed.updates.firstOrNull { it.type == "delta" && it.fromBuild == cur && it.build > cur } ?: break
+            out.add(step)
+            cur = step.build
+        }
+        return out
+    }
+
+    fun freeBytes(): Long = StatFs(Environment.getDataDirectory().path).availableBytes
+
+    // Remove downloads of updates that are already installed.
+    fun cleanup(ctx: Context) {
+        val dir = ctx.getExternalFilesDir(null) ?: return
         val cur = currentBuild()
-        return feed.build > cur || (channel(ctx) != romChannel() && feed.build != cur)
+        dir.listFiles()?.forEach { f ->
+            val m = Regex("update-(\\d+)\\.zip(\\.part)?").matchEntire(f.name)
+            if (m != null && m.groupValues[1].toInt() <= cur) f.delete()
+        }
     }
 
     private fun sha256(f: File): String {
@@ -102,10 +146,10 @@ object Ota {
         return md.digest().joinToString("") { "%02x".format(it) }
     }
 
-    fun download(ctx: Context, f: Feed, onProgress: (Long, Long) -> Unit): File {
+    fun download(ctx: Context, f: Update, onProgress: (Long, Long) -> Unit): File {
         val dir = ctx.getExternalFilesDir(null) ?: throw IOException("No storage available")
-        val out = File(dir, "update.zip")
-        val part = File(dir, "update.zip.part")
+        val out = File(dir, "update-${f.build}.zip")
+        val part = File(dir, "update-${f.build}.zip.part")
         if (out.exists() && out.length() == f.size && sha256(out) == f.sha256) return out
         out.delete()
 
@@ -145,7 +189,7 @@ object Ota {
                 conn.disconnect()
             }
         }
-        if (part.length() != f.size) throw IOException("Download incomplete, tap Update to resume")
+        if (part.length() != f.size) throw IOException("Download incomplete, tap Install to resume")
         if (sha256(part) != f.sha256) {
             part.delete()
             throw IOException("Checksum mismatch, download deleted")
@@ -188,7 +232,7 @@ object Ota {
         }
     }
 
-    fun notifyAvailable(ctx: Context, f: Feed) {
+    fun notifyAvailable(ctx: Context, count: Int, channel: String) {
         val nm = ctx.getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(
             NotificationChannel(NOTIFY_CHANNEL, "System updates", NotificationManager.IMPORTANCE_DEFAULT)
@@ -200,7 +244,7 @@ object Ota {
         val n = Notification.Builder(ctx, NOTIFY_CHANNEL)
             .setSmallIcon(android.R.drawable.stat_sys_download_done)
             .setContentTitle("ReCore update available")
-            .setContentText("Build ${f.build} (${f.channel})")
+            .setContentText(if (count == 1) "1 update ($channel)" else "$count updates ($channel)")
             .setContentIntent(pi)
             .setAutoCancel(true)
             .build()
