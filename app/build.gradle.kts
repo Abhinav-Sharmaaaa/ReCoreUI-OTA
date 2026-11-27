@@ -15,6 +15,8 @@ android {
         versionName = "1.0"
         val repo = providers.gradleProperty("otaRepo").orElse("owner/repo").get()
         buildConfigField("String", "OTA_REPO", "\"$repo\"")
+        val gate = providers.gradleProperty("gateUrl").orElse("").get()
+        buildConfigField("String", "GATE_URL", "\"$gate\"")
     }
 
     buildFeatures {

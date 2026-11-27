@@ -1,0 +1,38 @@
+name: Deploy gate
+run-name: Deploying the OTA gate worker
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'gate/**'
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Test the worker logic
+        working-directory: gate
+        run: node test.mjs
+
+      - name: Check that the KV id was filled in
+        working-directory: gate
+        run: |
+          if grep -q PASTE_KV_NAMESPACE_ID wrangler.toml; then
+            echo "::error::Put your KV namespace id into gate/wrangler.toml first"
+            exit 1
+          fi
+
+      - name: Deploy to Cloudflare
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: gate

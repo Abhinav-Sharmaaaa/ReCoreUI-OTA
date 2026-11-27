@@ -26,7 +26,7 @@ jobs:
           gradle-version: '8.10.2'
 
       - name: Build release APK
-        run: gradle --no-daemon assembleRelease -PotaRepo=${{ github.repository }}
+        run: gradle --no-daemon assembleRelease -PotaRepo=${{ github.repository }} -PgateUrl=${{ vars.GATE_URL }}
 
       - name: Locate the APK
         run: |

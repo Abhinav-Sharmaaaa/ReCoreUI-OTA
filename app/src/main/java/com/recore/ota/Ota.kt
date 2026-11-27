@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Environment
 import android.os.StatFs
+import android.provider.Settings
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -29,6 +30,9 @@ data class Update(
     val requiresFree: Long,
     val changelog: String
 )
+
+// Which branches this phone may use. release never needs approval.
+data class Access(val approved: Set<String>, val pending: Set<String>, val denied: Set<String>)
 
 data class Feed(
     val device: String,
@@ -54,10 +58,13 @@ object Ota {
 
     fun currentBuild(): Int = prop("ro.recore.ota.build").toIntOrNull() ?: 0
     fun romChannel(): String = prop("ro.recore.ota.channel").ifEmpty { "release" }
-    fun device(): String = prop("ro.product.device")
+    fun device(): String = prop("ro.recore.ota.device").ifEmpty { prop("ro.product.device") }
 
-    fun channel(ctx: Context): String =
-        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("channel", null) ?: romChannel()
+    fun channel(ctx: Context): String {
+        val want = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("channel", null) ?: romChannel()
+        if (want == "release" || !gateEnabled()) return want
+        return if (approvedBranches(ctx).contains(want)) want else "release"
+    }
 
     fun setChannel(ctx: Context, channel: String) {
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString("channel", channel).apply()
@@ -119,6 +126,67 @@ object Ota {
             cur = step.build
         }
         return out
+    }
+
+    // ---- branch access: test and beta need the developer's approval ----
+
+    fun gateEnabled(): Boolean = BuildConfig.GATE_URL.isNotEmpty()
+
+    fun deviceId(ctx: Context): String {
+        val aid = Settings.Secure.getString(ctx.contentResolver, Settings.Secure.ANDROID_ID) ?: "unknown"
+        val md = MessageDigest.getInstance("SHA-256").digest("recore:$aid".toByteArray())
+        return md.joinToString("") { "%02x".format(it) }.take(32)
+    }
+
+    private fun gateCall(method: String, path: String, body: JSONObject?): JSONObject {
+        val conn = URL(BuildConfig.GATE_URL.trimEnd('/') + path).openConnection() as HttpURLConnection
+        conn.requestMethod = method
+        conn.connectTimeout = 15000
+        conn.readTimeout = 15000
+        try {
+            if (body != null) {
+                conn.doOutput = true
+                conn.setRequestProperty("Content-Type", "application/json")
+                conn.outputStream.use { it.write(body.toString().toByteArray()) }
+            }
+            val code = conn.responseCode
+            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+            val text = stream?.bufferedReader()?.readText() ?: "{}"
+            val j = try {
+                JSONObject(text)
+            } catch (e: Exception) {
+                JSONObject()
+            }
+            if (code !in 200..299) throw IOException(j.optString("error", "HTTP $code"))
+            return j
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    fun approvedBranches(ctx: Context): Set<String> =
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getStringSet("approved", emptySet()) ?: emptySet()
+
+    fun fetchAccess(ctx: Context): Access {
+        val j = gateCall("GET", "/status?id=" + deviceId(ctx), null)
+        fun names(key: String): Set<String> {
+            val a = j.optJSONArray(key) ?: return emptySet()
+            return (0 until a.length()).map { a.getString(it) }.toSet()
+        }
+        val acc = Access(names("approved"), names("pending"), names("denied"))
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putStringSet("approved", acc.approved).apply()
+        return acc
+    }
+
+    // Returns "pending", "approved" or "denied".
+    fun requestAccess(ctx: Context, branch: String): String {
+        val body = JSONObject()
+            .put("id", deviceId(ctx))
+            .put("device", device())
+            .put("model", prop("ro.product.model"))
+            .put("branch", branch)
+            .put("build", currentBuild())
+        return gateCall("POST", "/request", body).optString("state", "pending")
     }
 
     fun freeBytes(): Long = StatFs(Environment.getDataDirectory().path).availableBytes
@@ -249,5 +317,24 @@ object Ota {
             .setAutoCancel(true)
             .build()
         nm.notify(1, n)
+    }
+
+    fun notifyInfo(ctx: Context, title: String, text: String) {
+        val nm = ctx.getSystemService(NotificationManager::class.java)
+        nm.createNotificationChannel(
+            NotificationChannel(NOTIFY_CHANNEL, "System updates", NotificationManager.IMPORTANCE_DEFAULT)
+        )
+        val pi = PendingIntent.getActivity(
+            ctx, 0, Intent(ctx, MainActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        val n = Notification.Builder(ctx, NOTIFY_CHANNEL)
+            .setSmallIcon(android.R.drawable.stat_sys_download_done)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setContentIntent(pi)
+            .setAutoCancel(true)
+            .build()
+        nm.notify(2, n)
     }
 }

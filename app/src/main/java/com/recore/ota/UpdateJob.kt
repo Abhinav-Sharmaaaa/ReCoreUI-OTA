@@ -12,6 +12,18 @@ class UpdateJob : JobService() {
     override fun onStartJob(params: JobParameters): Boolean {
         Thread {
             try {
+                if (Ota.gateEnabled()) {
+                    try {
+                        val before = Ota.approvedBranches(this)
+                        val acc = Ota.fetchAccess(this)
+                        val added = acc.approved - before
+                        if (added.isNotEmpty()) {
+                            Ota.notifyInfo(this, "Access approved", "You can now get ${added.joinToString(", ")} updates. Open ReCore Updater to switch.")
+                        }
+                    } catch (e: Exception) {
+                        // keep the last known access
+                    }
+                }
                 val feed = Ota.fetchFeed(Ota.channel(this))
                 if (feed != null && Ota.behind(feed)) {
                     val q = Ota.queue(feed)

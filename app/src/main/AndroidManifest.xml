@@ -8,6 +8,7 @@
 
     <application
         android:allowBackup="false"
+        android:icon="@drawable/ic_update"
         android:label="ReCore Updater"
         android:usesCleartextTraffic="false">
 
@@ -18,7 +19,41 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- Other apps (and Settings) that ask for the system update screen open this one. -->
+            <intent-filter android:priority="100">
+                <action android:name="android.settings.SYSTEM_UPDATE_SETTINGS" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
         </activity>
+
+        <!-- Adds a "Software update" row to Settings. Settings only accepts such rows from system apps,
+             so this works once the app is part of the ROM (ota_app.sh), not when installed with adb. -->
+        <activity-alias
+            android:name=".SettingsEntry"
+            android:exported="true"
+            android:icon="@drawable/ic_update"
+            android:label="Software update"
+            android:targetActivity=".MainActivity">
+            <intent-filter>
+                <action android:name="com.android.settings.action.IA_SETTINGS" />
+                <action android:name="com.android.settings.action.SETTINGS" />
+            </intent-filter>
+            <meta-data
+                android:name="com.android.settings.category"
+                android:value="com.android.settings.category.ia.homepage" />
+            <meta-data
+                android:name="com.android.settings.title"
+                android:value="Software update" />
+            <meta-data
+                android:name="com.android.settings.summary"
+                android:value="ReCore updates and channels" />
+            <meta-data
+                android:name="com.android.settings.icon"
+                android:resource="@drawable/ic_update" />
+            <meta-data
+                android:name="com.android.settings.order"
+                android:value="9000" />
+        </activity-alias>
 
         <service
             android:name=".UpdateJob"

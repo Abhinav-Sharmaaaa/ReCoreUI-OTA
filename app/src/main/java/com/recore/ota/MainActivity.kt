@@ -7,85 +7,92 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.View
-import android.widget.AdapterView
-import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
-import android.widget.Spinner
 import android.widget.TextView
 import java.util.concurrent.Executors
 
 class MainActivity : Activity() {
 
-    private val channels = listOf("test", "beta", "release")
     private val ui = Handler(Looper.getMainLooper())
     private val io = Executors.newSingleThreadExecutor()
 
-    private lateinit var info: TextView
+    private lateinit var versionText: TextView
     private lateinit var status: TextView
     private lateinit var changelog: TextView
     private lateinit var progress: ProgressBar
     private lateinit var checkBtn: Button
     private lateinit var updateBtn: Button
-    private lateinit var spinner: Spinner
+    private lateinit var branchBox: LinearLayout
+    private lateinit var branchHint: TextView
 
     private var feed: Feed? = null
     private var queue: List<Update> = emptyList()
+    private var access = Access(emptySet(), emptySet(), emptySet())
     private var busy = false
+    private var pad = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val pad = (16 * resources.displayMetrics.density).toInt()
+        pad = (16 * resources.displayMetrics.density).toInt()
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(pad * 2, pad * 3, pad * 2, pad)
         }
 
-        info = TextView(this).apply { textSize = 16f }
-        root.addView(info)
+        root.addView(TextView(this).apply {
+            text = "Software update"
+            textSize = 28f
+            setPadding(0, 0, 0, pad)
+        })
 
-        spinner = Spinner(this)
-        spinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, channels)
-        spinner.setSelection(channels.indexOf(Ota.channel(this)).coerceAtLeast(0))
-        spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(parent: AdapterView<*>?, v: View?, pos: Int, id: Long) {
-                val c = channels[pos]
-                if (c != Ota.channel(this@MainActivity)) {
-                    Ota.setChannel(this@MainActivity, c)
-                    feed = null
-                    queue = emptyList()
-                    updateBtn.visibility = View.GONE
-                    changelog.text = ""
-                    status.text = "Channel changed to $c. Tap Check for updates."
-                    refreshInfo()
-                }
-            }
+        versionText = TextView(this).apply { textSize = 15f }
+        root.addView(versionText)
 
-            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        status = TextView(this).apply {
+            textSize = 18f
+            setPadding(0, pad * 2, 0, pad / 2)
         }
-        root.addView(spinner)
-
-        checkBtn = Button(this).apply { text = "Check for updates" }
-        checkBtn.setOnClickListener { check() }
-        root.addView(checkBtn)
-
-        status = TextView(this).apply { textSize = 16f; setPadding(0, pad, 0, pad / 2) }
         root.addView(status)
 
         progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { max = 1000 }
         root.addView(progress)
 
-        changelog = TextView(this).apply { textSize = 14f; setPadding(0, pad, 0, pad) }
+        changelog = TextView(this).apply {
+            textSize = 14f
+            setPadding(0, pad, 0, pad)
+        }
         root.addView(changelog)
 
-        updateBtn = Button(this).apply { text = "Update now"; visibility = View.GONE }
+        updateBtn = Button(this).apply {
+            text = "Download and install"
+            visibility = View.GONE
+        }
         updateBtn.setOnClickListener { update() }
         root.addView(updateBtn)
 
+        checkBtn = Button(this).apply { text = "Check for updates" }
+        checkBtn.setOnClickListener { check() }
+        root.addView(checkBtn)
+
+        root.addView(TextView(this).apply {
+            text = "Update channel"
+            textSize = 20f
+            setPadding(0, pad * 2, 0, pad / 2)
+        })
+        branchBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root.addView(branchBox)
+        branchHint = TextView(this).apply {
+            textSize = 12f
+            setPadding(0, pad / 2, 0, 0)
+        }
+        root.addView(branchHint)
+
         setContentView(ScrollView(this).apply { addView(root) })
         refreshInfo()
+        renderBranches()
 
         if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
@@ -94,12 +101,123 @@ class MainActivity : Activity() {
         check()
     }
 
+    override fun onResume() {
+        super.onResume()
+        refreshAccess()
+    }
+
     private fun refreshInfo() {
-        info.text = "Device: ${Ota.device()}\nInstalled: build ${Ota.currentBuild()} (${Ota.romChannel()})\nChannel to check:"
+        versionText.text = "ReCore build ${Ota.currentBuild()} (${Ota.romChannel()})\n" +
+            "Device: ${Ota.device()}\nUpdate channel: ${Ota.channel(this)}"
     }
 
     private fun setStatus(t: String) {
         ui.post { status.text = t }
+    }
+
+    private fun renderBranches() {
+        branchBox.removeAllViews()
+        val current = Ota.channel(this)
+        val approved = Ota.approvedBranches(this)
+        val gate = Ota.gateEnabled()
+        val rows = if (gate) listOf("release", "beta", "test") else listOf("release")
+        for (b in rows) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, pad / 2, 0, pad / 2)
+            }
+            val label = TextView(this).apply {
+                text = b.replaceFirstChar { it.uppercase() }
+                textSize = 16f
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            val btn = Button(this)
+            when {
+                b == current -> {
+                    btn.text = "Current"
+                    btn.isEnabled = false
+                }
+                b == "release" || !gate || approved.contains(b) -> {
+                    btn.text = "Switch"
+                    btn.setOnClickListener { switchTo(b) }
+                }
+                access.pending.contains(b) -> {
+                    btn.text = "Waiting for approval"
+                    btn.isEnabled = false
+                }
+                access.denied.contains(b) -> {
+                    btn.text = "Declined"
+                    btn.isEnabled = false
+                }
+                else -> {
+                    btn.text = "Request access"
+                    btn.setOnClickListener { requestAccess(b) }
+                }
+            }
+            row.addView(label)
+            row.addView(btn)
+            branchBox.addView(row)
+        }
+        branchHint.text = if (gate) {
+            "Beta and test builds are for testers. Access has to be approved by the developer; you are told when it is. " +
+                "Release builds can be older than beta ones, so going back may need the full ROM zip."
+        } else {
+            "Beta and test access is not set up in this build."
+        }
+    }
+
+    private fun switchTo(branch: String) {
+        Ota.setChannel(this, branch)
+        feed = null
+        queue = emptyList()
+        updateBtn.visibility = View.GONE
+        changelog.text = ""
+        status.text = "Channel set to $branch."
+        refreshInfo()
+        renderBranches()
+        check()
+    }
+
+    private fun requestAccess(branch: String) {
+        if (busy) return
+        busy = true
+        setStatus("Sending your request...")
+        io.execute {
+            try {
+                val state = Ota.requestAccess(this, branch)
+                val a = Ota.fetchAccess(this)
+                ui.post {
+                    access = a
+                    status.text = when (state) {
+                        "approved" -> "Access to $branch is already approved."
+                        "denied" -> "Your request for $branch was declined."
+                        else -> "Request sent. You will get a notification when it is approved."
+                    }
+                    refreshInfo()
+                    renderBranches()
+                }
+            } catch (e: Exception) {
+                setStatus("Could not send the request: ${e.message}")
+            } finally {
+                busy = false
+            }
+        }
+    }
+
+    private fun refreshAccess() {
+        if (!Ota.gateEnabled()) return
+        io.execute {
+            try {
+                val a = Ota.fetchAccess(this)
+                ui.post {
+                    access = a
+                    refreshInfo()
+                    renderBranches()
+                }
+            } catch (e: Exception) {
+                // offline: keep what is known
+            }
+        }
     }
 
     private fun check() {
@@ -109,6 +227,18 @@ class MainActivity : Activity() {
         io.execute {
             try {
                 Ota.cleanup(this)
+                if (Ota.gateEnabled()) {
+                    try {
+                        val a = Ota.fetchAccess(this)
+                        ui.post {
+                            access = a
+                            refreshInfo()
+                            renderBranches()
+                        }
+                    } catch (e: Exception) {
+                        // offline: keep what is known
+                    }
+                }
                 val f = Ota.fetchFeed(Ota.channel(this))
                 ui.post {
                     feed = f
@@ -117,7 +247,7 @@ class MainActivity : Activity() {
                         status.text = "No update feed found for this channel."
                         updateBtn.visibility = View.GONE
                     } else if (!Ota.behind(f)) {
-                        status.text = "You are up to date."
+                        status.text = "Your software is up to date."
                         changelog.text = ""
                         updateBtn.visibility = View.GONE
                     } else {
@@ -134,7 +264,7 @@ class MainActivity : Activity() {
                             }.joinToString("\n\n")
                             val rest = if (q.last().build != f.build) "\n\nBuild ${f.build} needs the full ROM zip." else ""
                             changelog.text = lines + rest
-                            updateBtn.text = "Install update 1 of ${q.size} (build ${q.first().build})"
+                            updateBtn.text = if (q.size == 1) "Download and install" else "Download and install (1 of ${q.size})"
                             updateBtn.visibility = View.VISIBLE
                         }
                     }
