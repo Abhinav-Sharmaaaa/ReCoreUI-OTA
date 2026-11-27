@@ -1,0 +1,11 @@
+name = "recore-gate"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+# Create a KV namespace in the Cloudflare dashboard (Storage & Databases > KV) and paste its id here.
+[[kv_namespaces]]
+binding = "GATE"
+id = "ec622238eb0a4f4890a681015f5ea312"
+
+# Secrets are NOT stored here. Set ADMIN_TOKEN and NTFY_TOPIC in the Cloudflare dashboard
+# (Worker > Settings > Variables and Secrets). They survive every deploy.
